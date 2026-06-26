@@ -1,0 +1,53 @@
+# 手术式重构 Agent 配置
+spring:
+  application:
+    name: rebuild-agent
+  main:
+    # 关闭 banner 以保持 CLI 输出整洁
+    banner-mode: off
+    # 允许循环引用（部分工具服务相互引用）
+    allow-circular-references: true
+
+# 重构 Agent 配置
+rebuild:
+  # LLM 配置（支持通义千问/Claude/OpenAI 兼容接口）
+  llm:
+    # 通义千问 DashScope 兼容接口；Claude 可用 https://api.anthropic.com
+    base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    # API Key，请替换为你的真实 Key；留空则使用规则引擎降级分析
+    api-key: ${REBUILD_LLM_API_KEY:}
+    # 模型名称：qwen-plus / qwen-max / gpt-4o / claude-3-sonnet
+    model-name: qwen-plus
+    temperature: 0.3
+    max-tokens: 4096
+
+  # Neo4j 嵌入式数据存储目录
+  graph:
+    neo4j:
+      data-path: ./neo4j-data
+
+  # Maven 配置
+  maven:
+    # Maven home 目录，留空则使用系统 PATH 中的 mvn
+    home: ${MAVEN_HOME:}
+    # Maven 仓库镜像（可选）
+    repo: ""
+    # 测试超时时间（毫秒），默认 10 分钟
+    timeout-ms: 600000
+
+  # 重构执行器配置
+  executor:
+    # 最大连续失败重试次数，超过则生成人工介入报告
+    max-retries: 3
+
+  # 报告输出目录
+  report:
+    output-dir: ./rebuild-reports
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+    com.rebuild.agent: DEBUG
+    org.neo4j: WARN
+    org.springframework: WARN
