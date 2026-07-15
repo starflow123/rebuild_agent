@@ -41,11 +41,10 @@ public class Neo4jGraphStore {
      * @param dataPath Neo4j 数据存储目录，从配置读取
      */
     public Neo4jGraphStore(@Value("${rebuild.graph.neo4j.data-path:./neo4j-data}") String dataPath) {
-        Path dbPath = Paths.get(dataPath).toAbsolutePath();
+        Path dbPath = Paths.get(dataPath).toAbsolutePath().normalize();
         log.info("启动嵌入式 Neo4j，数据目录: {}", dbPath);
         this.managementService = new DatabaseManagementServiceBuilder(dbPath).build();
         this.graphDb = managementService.database(DEFAULT_DB);
-        // 创建索引以加速按类名查询
         createIndex();
         log.info("嵌入式 Neo4j 启动完成");
     }

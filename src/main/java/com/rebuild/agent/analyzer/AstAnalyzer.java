@@ -1,6 +1,7 @@
 package com.rebuild.agent.analyzer;
 
 import com.github.javaparser.JavaParser;
+import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.Modifier;
@@ -28,7 +29,14 @@ public class AstAnalyzer {
 
     private static final Logger log = LoggerFactory.getLogger(AstAnalyzer.class);
 
-    private final JavaParser javaParser = new JavaParser();
+    private final JavaParser javaParser;
+
+    public AstAnalyzer() {
+        ParserConfiguration config = new ParserConfiguration();
+        config.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
+        this.javaParser = new JavaParser(config);
+        log.info("JavaParser 已配置支持 Java 17 语法");
+    }
 
     /**
      * 解析单个 Java 源文件，提取其中所有类节点

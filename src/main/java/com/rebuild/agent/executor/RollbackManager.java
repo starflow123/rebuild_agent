@@ -48,7 +48,6 @@ public class RollbackManager {
         try {
             Path backupDir = backupRoot.resolve("step-" + stepIndex);
             Files.createDirectories(backupDir);
-            // 用文件名的 hash 作为备份文件名，避免路径冲突
             String backupName = Math.abs(sourceFile.toString().hashCode()) + "_" + sourceFile.getFileName();
             Path backupFile = backupDir.resolve(backupName);
             FileUtils.copyFile(sourceFile.toFile(), backupFile.toFile());
@@ -59,6 +58,23 @@ public class RollbackManager {
         } catch (IOException e) {
             log.error("备份文件失败: {}", sourceFile, e);
             throw new RuntimeException("备份文件失败: " + sourceFile, e);
+        }
+    }
+
+    /**
+     * 注册新建的文件，用于回滚时删除
+     * @param stepIndex 步骤序号
+     * @param newFile 新建的文件路径
+     */
+    public void registerNewFile(int stepIndex, Path newFile) {
+        try {
+            Path backupDir = backupRoot.resolve("step-" + stepIndex);
+            Files.createDirectories(backupDir);
+            stepBackups.computeIfAbsent(stepIndex, k -> new ArrayList<>())
+                    .add(new BackupEntry(newFile, null));
+            log.debug("已注册新建文件: {}", newFile);
+        } catch (IOException e) {
+            log.error("注册新文件失败: {}", newFile, e);
         }
     }
 
@@ -75,10 +91,15 @@ public class RollbackManager {
         log.info("开始回滚步骤 {}，涉及 {} 个文件", stepIndex, backups.size());
         for (BackupEntry entry : backups) {
             try {
-                FileUtils.copyFile(entry.backupFile.toFile(), entry.sourceFile.toFile());
-                log.info("已恢复文件: {}", entry.sourceFile);
+                if (entry.backupFile != null) {
+                    FileUtils.copyFile(entry.backupFile.toFile(), entry.sourceFile.toFile());
+                    log.info("已恢复文件: {}", entry.sourceFile);
+                } else {
+                    Files.deleteIfExists(entry.sourceFile);
+                    log.info("已删除新建文件: {}", entry.sourceFile);
+                }
             } catch (IOException e) {
-                log.error("恢复文件失败: {}", entry.sourceFile, e);
+                log.error("恢复/删除文件失败: {}", entry.sourceFile, e);
             }
         }
     }

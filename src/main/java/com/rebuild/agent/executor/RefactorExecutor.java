@@ -16,7 +16,7 @@ import java.util.List;
  * 重构执行器：编排"修改代码 -> 运行测试 -> 失败分析 -> 自动修正/回滚"的完整流程
  * <p>
  * 第三步（增量执行 + 回滚保障）的总调度。
- * 每个重构步骤执行后自动触发 mvn test；测试失败时分析堆栈并自动修正；
+ * 每个重构步骤执行后自动触发测试（Maven/Gradle 自动检测）；测试失败时分析堆栈并自动修正；
  * 连续失败超过阈值（默认 3 次）则回滚并生成"人工介入报告"。
  */
 @Component
@@ -29,15 +29,15 @@ public class RefactorExecutor {
     private int maxRetries;
 
     private final CodeModifier codeModifier;
-    private final MavenInvoker mavenInvoker;
+    private final BuildInvokerService buildInvokerService;
     private final RollbackManager rollbackManager;
     private final FailureAnalyzer failureAnalyzer;
 
     @Autowired
-    public RefactorExecutor(CodeModifier codeModifier, MavenInvoker mavenInvoker,
+    public RefactorExecutor(CodeModifier codeModifier, BuildInvokerService buildInvokerService,
                             RollbackManager rollbackManager, FailureAnalyzer failureAnalyzer) {
         this.codeModifier = codeModifier;
-        this.mavenInvoker = mavenInvoker;
+        this.buildInvokerService = buildInvokerService;
         this.rollbackManager = rollbackManager;
         this.failureAnalyzer = failureAnalyzer;
     }
@@ -103,8 +103,15 @@ public class RefactorExecutor {
                 List<Path> modifiedFiles = codeModifier.executeStep(step, projectRoot);
                 stepResult.getModifiedFiles().addAll(modifiedFiles);
 
-                // 3. 运行测试
-                TestResult testResult = mavenInvoker.runTests(projectRoot.toString());
+                // 3. 注册新建的文件（用于回滚时删除）
+                for (Path modifiedFile : modifiedFiles) {
+                    if (!modifiedFile.equals(projectRoot.resolve(step.getTargetFile()))) {
+                        rollbackManager.registerNewFile(step.getStepIndex(), modifiedFile);
+                    }
+                }
+
+                // 4. 运行测试（自动检测 Maven/Gradle）
+                TestResult testResult = buildInvokerService.runTests(projectRoot.toString());
                 stepResult.setTestResult(testResult);
 
                 if (testResult.isSuccess()) {
@@ -115,7 +122,7 @@ public class RefactorExecutor {
                     return stepResult;
                 }
 
-                // 4. 测试失败，分析原因
+                // 5. 测试失败，分析原因
                 FailureAnalyzer.FailureAnalysis analysis = failureAnalyzer.analyze(testResult);
                 stepResult.setFailureAnalysis(analysis);
                 log.warn("步骤 {} 第 {} 次尝试失败: {}", step.getStepIndex(), attempt, analysis.getSummary());
@@ -129,12 +136,9 @@ public class RefactorExecutor {
                     return stepResult;
                 }
 
-                // 5. 自动修正：回滚后根据失败分析重新修改（简化：回滚本次修改，由 Agent 重新决策）
+                // 6. 自动修正：回滚后根据失败分析重新修改
                 rollbackManager.rollback(step.getStepIndex());
                 log.info("步骤 {} 已回滚，准备第 {} 次修正尝试", step.getStepIndex(), attempt + 1);
-
-                // 注：实际的自动修正逻辑由 Agent 调用 LLM 分析失败原因后，
-                // 重新调用 CodeModifier 的具体方法完成。此处仅提供重试框架。
 
             } catch (Exception e) {
                 log.error("步骤 {} 执行异常", step.getStepIndex(), e);

@@ -2,7 +2,7 @@ package com.rebuild.agent.agent;
 
 import com.rebuild.agent.agent.tools.*;
 import com.rebuild.agent.config.AgentConfig;
-import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.service.AiServices;
 import org.slf4j.Logger;
@@ -26,7 +26,7 @@ public class RefactorAgentFactory {
     private final GodClassDetectorTool godClassDetectorTool;
     private final RefactorPlanTool refactorPlanTool;
     private final CodeModifyTool codeModifyTool;
-    private final MavenTestTool mavenTestTool;
+    private final BuildTestTool buildTestTool;
     private final RiskAssessTool riskAssessTool;
 
     @Autowired
@@ -35,14 +35,14 @@ public class RefactorAgentFactory {
                                 GodClassDetectorTool godClassDetectorTool,
                                 RefactorPlanTool refactorPlanTool,
                                 CodeModifyTool codeModifyTool,
-                                MavenTestTool mavenTestTool,
+                                BuildTestTool buildTestTool,
                                 RiskAssessTool riskAssessTool) {
         this.agentConfig = agentConfig;
         this.graphQueryTool = graphQueryTool;
         this.godClassDetectorTool = godClassDetectorTool;
         this.refactorPlanTool = refactorPlanTool;
         this.codeModifyTool = codeModifyTool;
-        this.mavenTestTool = mavenTestTool;
+        this.buildTestTool = buildTestTool;
         this.riskAssessTool = riskAssessTool;
     }
 
@@ -53,8 +53,7 @@ public class RefactorAgentFactory {
     public RefactorAgent createAgent() {
         log.info("构建重构 Agent，LLM: {} @ {}", agentConfig.getModelName(), agentConfig.getBaseUrl());
 
-        // 1. 构建 ChatLanguageModel（OpenAI 兼容接口，支持通义千问/Claude）
-        ChatLanguageModel model = OpenAiChatModel.builder()
+        ChatModel model = OpenAiChatModel.builder()
                 .baseUrl(agentConfig.getBaseUrl())
                 .apiKey(agentConfig.getApiKey())
                 .modelName(agentConfig.getModelName())
@@ -62,14 +61,14 @@ public class RefactorAgentFactory {
                 .maxTokens(agentConfig.getMaxTokens())
                 .build();
 
-        // 2. 构建 Agent，注册所有工具
         RefactorAgent agent = AiServices.builder(RefactorAgent.class)
-                .chatLanguageModel(model)
+                .chatModel(model)
                 .tools(graphQueryTool, godClassDetectorTool, refactorPlanTool,
-                        codeModifyTool, mavenTestTool, riskAssessTool)
+                        codeModifyTool, buildTestTool, riskAssessTool)
+                .maxSequentialToolsInvocations(30)
                 .build();
 
-        log.info("重构 Agent 构建完成，已注册 6 个工具");
+        log.info("重构 Agent 构建完成，已注册 6 个工具，最大工具调用次数: 30");
         return agent;
     }
 

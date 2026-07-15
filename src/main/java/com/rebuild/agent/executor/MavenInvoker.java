@@ -7,68 +7,68 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.io.File;
-import java.io.PrintWriter;
-import java.io.StringWriter;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Maven 调用器：通过 Maven Invoker API 触发 mvn test
- * <p>
- * 第三步（增量执行 + 回滚保障）的测试验证环节。
- * 每次代码修改后调用 runTests 执行测试，返回结构化的 TestResult。
- */
 @Component
 public class MavenInvoker {
 
     private static final Logger log = LoggerFactory.getLogger(MavenInvoker.class);
 
-    /** Maven home 目录，从配置读取 */
-    @Value("${rebuild.maven.home:}")
+    @Value("${rebuild.build.maven-home:}")
     private String mavenHome;
 
-    /** Maven 仓库地址（可选，用于加速依赖下载） */
-    @Value("${rebuild.maven.repo:}")
-    private String mavenRepo;
+    @Value("${rebuild.build.jdk-home:}")
+    private String jdkHome;
 
-    /** 测试超时时间（毫秒），默认 10 分钟 */
-    @Value("${rebuild.maven.timeout-ms:600000}")
+    @Value("${rebuild.build.timeout-ms:600000}")
     private long timeoutMs;
 
-    /**
-     * 在指定项目目录执行 mvn test
-     * @param projectDir 项目根目录
-     * @return 测试执行结果
-     */
     public TestResult runTests(String projectDir) {
-        log.info("执行 mvn test，项目目录: {}", projectDir);
+        return runBuild(projectDir, "test");
+    }
+
+    public TestResult runBuild(String projectDir, String goal) {
+        log.info("执行 mvn {}，项目目录: {}", goal, projectDir);
         long startTime = System.currentTimeMillis();
 
-        Invoker invoker = new DefaultInvoker();
-        // 设置 Maven home
-        if (mavenHome != null && !mavenHome.isEmpty()) {
-            invoker.setMavenHome(new File(mavenHome));
-        }
-
-        InvocationRequest request = new DefaultInvocationRequest();
-        request.setPomFile(new File(projectDir, "pom.xml"));
-        request.setGoals(Collections.singletonList("test"));
-        // 离线模式可选
-        request.setBatchMode(true);
-        // 不显示颜色，便于解析输出
-        request.addArg("-B");
-
-        // 超时设置
-        request.setShowErrors(true);
-
-        // 捕获输出
-        StringWriter outputWriter = new StringWriter();
-        request.setOutputHandler(new PrintWriterConsumer(new PrintWriter(outputWriter, true)));
+        String resolvedMavenHome = resolveMavenHome();
+        log.info("解析到 Maven home: {}", resolvedMavenHome);
 
         TestResult result = new TestResult();
+
+        if (resolvedMavenHome != null && !resolvedMavenHome.isEmpty()) {
+            result = runWithMavenInvokerAPI(projectDir, resolvedMavenHome, goal, startTime);
+            if (result.isSuccess()) {
+                return result;
+            }
+            log.warn("Maven Invoker API 执行失败，尝试系统命令方式...");
+        }
+
+        result = runWithSystemCommand(projectDir, goal, startTime);
+        return result;
+    }
+
+    private TestResult runWithMavenInvokerAPI(String projectDir, String mavenHomePath, String goal, long startTime) {
+        TestResult result = new TestResult();
         try {
+            Invoker invoker = new DefaultInvoker();
+            invoker.setMavenHome(new File(mavenHomePath));
+
+            InvocationRequest request = new DefaultInvocationRequest();
+            request.setPomFile(new File(projectDir, "pom.xml"));
+            request.setGoals(Collections.singletonList(goal));
+            request.setBatchMode(true);
+            request.addArg("-B");
+            request.setShowErrors(true);
+
+            StringWriter outputWriter = new StringWriter();
+            request.setOutputHandler(new PrintWriterConsumer(new PrintWriter(outputWriter, true)));
+
             InvocationResult invocationResult = invoker.execute(request);
             long duration = System.currentTimeMillis() - startTime;
             result.setDurationMs(duration);
@@ -76,34 +76,152 @@ public class MavenInvoker {
             String output = outputWriter.toString();
             result.setRawOutput(output.length() > 5000 ? output.substring(0, 5000) : output);
 
-            // 解析测试结果
-            parseTestOutput(output, result);
-
-            // Maven 退出码 0 表示成功
+            parseBuildOutput(output, result, goal);
             result.setSuccess(invocationResult.getExitCode() == 0 && result.getErrors() == 0 && result.getFailures() == 0);
 
-            log.info("mvn test 完成，耗时 {} ms，成功: {}，通过: {}，失败: {}，错误: {}",
-                    duration, result.isSuccess(), result.getPassed(), result.getFailures(), result.getErrors());
+            log.info("mvn {} 完成，耗时 {} ms，成功: {}", goal, duration, result.isSuccess());
 
         } catch (MavenInvocationException e) {
-            log.error("调用 Maven 失败", e);
+            log.error("Maven Invoker API 调用失败", e);
             result.setSuccess(false);
             result.setFailureSummary("Maven 调用异常: " + e.getMessage());
             result.setDurationMs(System.currentTimeMillis() - startTime);
         }
-
         return result;
     }
 
-    /**
-     * 解析 Maven surefire 测试输出，提取测试统计与失败详情
-     * 典型输出格式：
-     *   Tests run: 10, Failures: 1, Errors: 0, Skipped: 0
-     *   Tests run: 10, Failures: 1, Errors: 0, Skipped: 0, Time elapsed: 2.345 s <<< FAILURE! - in com.example.OrderTest
-     *   OrderTest.testCreate:45 expected:<true> but was:<false>
-     */
+    private TestResult runWithSystemCommand(String projectDir, String goal, long startTime) {
+        TestResult result = new TestResult();
+        try {
+            ProcessBuilder processBuilder = new ProcessBuilder();
+            processBuilder.directory(new File(projectDir));
+
+            Map<String, String> env = processBuilder.environment();
+            if (jdkHome != null && !jdkHome.isEmpty()) {
+                env.put("JAVA_HOME", jdkHome);
+                env.put("PATH", jdkHome + File.separator + "bin" + File.pathSeparator + env.getOrDefault("PATH", ""));
+                log.info("设置 JAVA_HOME: {}", jdkHome);
+            }
+
+            String os = System.getProperty("os.name").toLowerCase();
+            if (os.contains("win")) {
+                processBuilder.command("cmd", "/c", "mvn", goal, "-B");
+            } else {
+                processBuilder.command("mvn", goal, "-B");
+            }
+
+            Process process = processBuilder.start();
+
+            StringBuilder outputBuilder = new StringBuilder();
+            StringBuilder errorBuilder = new StringBuilder();
+
+            Thread outputThread = readStream(process.getInputStream(), outputBuilder);
+            Thread errorThread = readStream(process.getErrorStream(), errorBuilder);
+
+            boolean completed = process.waitFor(timeoutMs / 1000, java.util.concurrent.TimeUnit.SECONDS);
+
+            if (!completed) {
+                process.destroyForcibly();
+                result.setSuccess(false);
+                result.setFailureSummary("Maven 执行超时");
+                result.setDurationMs(System.currentTimeMillis() - startTime);
+                return result;
+            }
+
+            outputThread.join(5000);
+            errorThread.join(5000);
+
+            String output = outputBuilder.toString() + errorBuilder.toString();
+            long duration = System.currentTimeMillis() - startTime;
+            result.setDurationMs(duration);
+            result.setRawOutput(output.length() > 5000 ? output.substring(0, 5000) : output);
+
+            parseBuildOutput(output, result, goal);
+
+            int exitCode = process.exitValue();
+            result.setSuccess(exitCode == 0 && result.getErrors() == 0 && result.getFailures() == 0);
+
+            log.info("mvn {} 完成，退出码: {}，成功: {}", goal, exitCode, result.isSuccess());
+
+        } catch (IOException | InterruptedException e) {
+            log.error("系统命令执行失败", e);
+            result.setSuccess(false);
+            result.setFailureSummary("执行 mvn 命令失败: " + e.getMessage());
+            result.setDurationMs(System.currentTimeMillis() - startTime);
+        }
+        return result;
+    }
+
+    private Thread readStream(InputStream is, StringBuilder builder) {
+        Thread thread = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    builder.append(line).append("\n");
+                }
+            } catch (IOException e) {
+                log.debug("读取输出流失败", e);
+            }
+        });
+        thread.start();
+        return thread;
+    }
+
+    private String resolveMavenHome() {
+        if (mavenHome != null && !mavenHome.isEmpty()) {
+            return mavenHome;
+        }
+
+        String envMavenHome = System.getenv("MAVEN_HOME");
+        if (envMavenHome != null && !envMavenHome.isEmpty()) {
+            return envMavenHome;
+        }
+
+        String envM2Home = System.getenv("M2_HOME");
+        if (envM2Home != null && !envM2Home.isEmpty()) {
+            return envM2Home;
+        }
+
+        String userHome = System.getProperty("user.home");
+        String commonPath = userHome + File.separator + "apache-maven";
+        if (new File(commonPath).exists()) {
+            return commonPath;
+        }
+
+        String programFiles = System.getenv("PROGRAMFILES");
+        if (programFiles != null) {
+            String mavenPath = programFiles + File.separator + "Apache" + File.separator + "Maven";
+            if (new File(mavenPath).exists()) {
+                return mavenPath;
+            }
+        }
+
+        return null;
+    }
+
+    private void parseBuildOutput(String output, TestResult result, String goal) {
+        if ("test".equals(goal)) {
+            parseTestOutput(output, result);
+            return;
+        }
+
+        if (output.contains("BUILD SUCCESS")) {
+            result.setSuccess(true);
+        } else if (output.contains("BUILD FAILURE")) {
+            result.setSuccess(false);
+            Pattern errorPattern = Pattern.compile("\\[ERROR\\]\\s*(.+?)\\n");
+            Matcher matcher = errorPattern.matcher(output);
+            StringBuilder summaryBuilder = new StringBuilder();
+            int errorCount = 0;
+            while (matcher.find() && errorCount < 5) {
+                summaryBuilder.append(matcher.group(1)).append("\n");
+                errorCount++;
+            }
+            result.setFailureSummary(summaryBuilder.toString().trim());
+        }
+    }
+
     private void parseTestOutput(String output, TestResult result) {
-        // 匹配汇总行：Tests run: X, Failures: Y, Errors: Z, Skipped: W
         Pattern summaryPattern = Pattern.compile(
                 "Tests run:\\s*(\\d+),\\s*Failures:\\s*(\\d+),\\s*Errors:\\s*(\\d+),\\s*Skipped:\\s*(\\d+)");
         Matcher matcher = summaryPattern.matcher(output);
@@ -126,7 +244,6 @@ public class MavenInvoker {
             result.setPassed(totalRun - totalFailures - totalErrors - totalSkipped);
         }
 
-        // 匹配失败用例详情：TestClass.testMethod:line message
         Pattern failurePattern = Pattern.compile(
                 "([\\w.]+)\\.([\\w]+)\\s*[:：]\\s*(?:\\d+\\s*)?[:：]?\\s*(.+?)(?:\\n|$)");
         Matcher failMatcher = failurePattern.matcher(output);
@@ -136,7 +253,6 @@ public class MavenInvoker {
             String testClass = failMatcher.group(1);
             String testMethod = failMatcher.group(2);
             String message = failMatcher.group(3).trim();
-            // 过滤掉汇总行误匹配
             if (testClass.contains("Tests") || testClass.contains("run")) {
                 continue;
             }
@@ -151,9 +267,6 @@ public class MavenInvoker {
         }
     }
 
-    /**
-     * 将输出行转发到 PrintWriter 的消费者
-     */
     private static class PrintWriterConsumer implements InvocationOutputHandler {
         private final PrintWriter writer;
 

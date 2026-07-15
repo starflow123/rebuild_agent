@@ -6,7 +6,38 @@ import org.springframework.context.annotation.Configuration;
 /**
  * Agent 配置属性：LLM 连接参数
  * <p>
- * 支持通义千问、Claude、OpenAI 等兼容 OpenAI 接口的 LLM 服务。
+ * 支持所有 OpenAI 兼容接口的 LLM 服务，配置示例：
+ * <p>
+ * <strong>通义千问（默认）</strong>
+ * <pre>
+ * base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+ * model-name: qwen-plus
+ * </pre>
+ * <p>
+ * <strong>DeepSeek</strong>
+ * <pre>
+ * base-url: https://api.deepseek.com/v1
+ * model-name: deepseek-chat
+ * </pre>
+ * <p>
+ * <strong>Claude（Anthropic）</strong>
+ * <pre>
+ * base-url: https://api.anthropic.com/v1
+ * model-name: claude-3-sonnet-20240229
+ * </pre>
+ * <p>
+ * <strong>OpenAI</strong>
+ * <pre>
+ * base-url: https://api.openai.com/v1
+ * model-name: gpt-4o
+ * </pre>
+ * <p>
+ * <strong>Ollama（本地部署）</strong>
+ * <pre>
+ * base-url: http://localhost:11434/v1
+ * api-key: ollama
+ * model-name: llama3.3:70b
+ * </pre>
  */
 @Configuration
 public class AgentConfig {
@@ -31,6 +62,14 @@ public class AgentConfig {
     @Value("${rebuild.llm.max-tokens:4096}")
     private int maxTokens;
 
+    /** 验证模式：test / compile / skip */
+    @Value("${rebuild.executor.test-mode:test}")
+    private String testMode;
+
+    /** 最大重试次数 */
+    @Value("${rebuild.executor.max-retries:3}")
+    private int maxRetries;
+
     public String getBaseUrl() {
         return baseUrl;
     }
@@ -49,5 +88,13 @@ public class AgentConfig {
 
     public int getMaxTokens() {
         return maxTokens;
+    }
+
+    public String getTestMode() {
+        return testMode;
+    }
+
+    public int getMaxRetries() {
+        return maxRetries;
     }
 }

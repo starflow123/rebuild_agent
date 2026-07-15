@@ -16,6 +16,7 @@ F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\graph\GraphConstan
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\model\RiskLevel.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\agent\tools\GraphQueryTool.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\executor\FailureAnalyzer.java
+F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\executor\GradleInvoker.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\model\DependencyType.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\model\RefactorStep.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\model\SubGraph.java
@@ -23,6 +24,7 @@ F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\analyzer\AstAnalyz
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\agent\PromptTemplates.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\model\MethodNode.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\model\TestResult.java
+F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\agent\tools\BuildTestTool.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\agent\RefactorAgentFactory.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\model\DependencyEdge.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\agent\tools\RefactorPlanTool.java
@@ -33,4 +35,5 @@ F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\agent\tools\MavenT
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\executor\RollbackManager.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\report\ImpactReportGenerator.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\agent\tools\GodClassDetectorTool.java
+F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\executor\BuildInvokerService.java
 F:\JAVA\project\rebuild_agent\src\main\java\com\rebuild\agent\executor\MavenInvoker.java

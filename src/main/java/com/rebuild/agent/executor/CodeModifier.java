@@ -1,6 +1,7 @@
 package com.rebuild.agent.executor;
 
 import com.github.javaparser.JavaParser;
+import com.github.javaparser.ParserConfiguration;
 import com.github.javaparser.ParseResult;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.Modifier;
@@ -30,7 +31,14 @@ public class CodeModifier {
 
     private static final Logger log = LoggerFactory.getLogger(CodeModifier.class);
 
-    private final JavaParser javaParser = new JavaParser();
+    private final JavaParser javaParser;
+
+    public CodeModifier() {
+        ParserConfiguration config = new ParserConfiguration();
+        config.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
+        this.javaParser = new JavaParser(config);
+        log.info("CodeModifier JavaParser 已配置支持 Java 17 语法");
+    }
 
     /**
      * 提取新类：从原类中抽取指定方法和字段，创建新类
@@ -91,17 +99,19 @@ public class CodeModifier {
         // 4. 从原类中移除并迁移字段
         for (String fieldName : fieldsToMove) {
             for (FieldDeclaration field : new ArrayList<>(sourceClass.getFields())) {
-                for (VariableDeclarator var : field.getVariables()) {
+                List<VariableDeclarator> variablesCopy = new ArrayList<>(field.getVariables());
+                for (VariableDeclarator var : variablesCopy) {
                     if (var.getNameAsString().equals(fieldName)) {
-                        // 复制字段到新类
-                        FieldDeclaration copiedField = field.clone();
-                        copiedField.getVariables().clear();
-                        copiedField.addVariable(var.clone());
-                        newClassDecl.addMember(copiedField);
-                        // 从原类移除该变量
-                        field.remove(var);
-                        log.debug("迁移字段: {}", fieldName);
-                    }
+                    FieldDeclaration copiedField = new FieldDeclaration();
+                    field.getModifiers().forEach(m -> copiedField.addModifier(m.getKeyword()));
+                    copiedField.addVariable(var.clone());
+                    newClassDecl.addMember(copiedField);
+                    field.remove(var);
+                    log.debug("迁移字段: {}", fieldName);
+                }
+                }
+                if (field.getVariables().isEmpty()) {
+                    sourceClass.remove(field);
                 }
             }
         }
@@ -182,15 +192,16 @@ public class CodeModifier {
             for (VariableDeclarator var : new ArrayList<>(field.getVariables())) {
                 if (var.getNameAsString().equals(fieldName)) {
                     FieldDeclaration newField = new FieldDeclaration();
-                    // 复制修饰符
                     field.getModifiers().forEach(m -> newField.addModifier(m.getKeyword()));
                     newField.addVariable(var.clone());
-                    newField.setVariables(field.getVariables());
-                    targetClass.addMember(newField.clone());
+                    targetClass.addMember(newField);
                     field.remove(var);
                     found = true;
                     log.debug("字段 {} 已迁移", fieldName);
                 }
+            }
+            if (field.getVariables().isEmpty()) {
+                sourceClass.remove(field);
             }
         }
         if (!found) {
@@ -269,18 +280,135 @@ public class CodeModifier {
      */
     public List<Path> executeStep(RefactorStep step, Path projectRoot) {
         List<Path> modifiedFiles = new ArrayList<>();
+        String targetFile = step.getTargetFile();
+        String targetClass = step.getTargetClass();
+        String methodName = step.getMethodName();
+
+        if (targetFile == null || targetClass == null) {
+            log.warn("步骤缺少必要参数: targetFile={}, targetClass={}", targetFile, targetClass);
+            return modifiedFiles;
+        }
+
+        Path sourcePath = projectRoot.resolve(targetFile);
+
         switch (step.getStepType()) {
             case EXTRACT_CLASS -> {
-                // 简化处理：实际参数从 step 的 description 解析或由 Agent 提供
                 log.info("执行 EXTRACT_CLASS: {}", step.getDescription());
-                // 具体参数由 Agent 工具直接调用 extractClass 方法传入
+                String description = step.getDescription();
+                String newClassName = extractNewClassName(description);
+                if (newClassName != null) {
+                    String packageName = extractPackageName(sourcePath);
+                    modifiedFiles.add(extractClass(sourcePath, targetClass, newClassName, packageName,
+                            extractMethodNames(description), extractFieldNames(description)));
+                    modifiedFiles.add(sourcePath);
+                } else {
+                    log.warn("无法从描述中提取新类名: {}", description);
+                }
             }
-            case MOVE_METHOD -> log.info("执行 MOVE_METHOD: {}", step.getDescription());
-            case MOVE_FIELD -> log.info("执行 MOVE_FIELD: {}", step.getDescription());
-            case UPDATE_REFERENCE -> log.info("执行 UPDATE_REFERENCE: {}", step.getDescription());
+            case MOVE_METHOD -> {
+                log.info("执行 MOVE_METHOD: {}", step.getDescription());
+                String targetClassName = extractTargetClassName(step.getDescription());
+                if (targetClassName != null && methodName != null) {
+                    Path targetPath = resolveSourceFile(sourcePath, extractPackageName(sourcePath), targetClassName);
+                    moveMethod(sourcePath, targetClass, methodName, targetPath, targetClassName);
+                    modifiedFiles.add(sourcePath);
+                    modifiedFiles.add(targetPath);
+                }
+            }
+            case MOVE_FIELD -> {
+                log.info("执行 MOVE_FIELD: {}", step.getDescription());
+                String fieldName = extractFieldName(step.getDescription());
+                String targetClassName = extractTargetClassName(step.getDescription());
+                if (fieldName != null && targetClassName != null) {
+                    Path targetPath = resolveSourceFile(sourcePath, extractPackageName(sourcePath), targetClassName);
+                    moveField(sourcePath, targetClass, fieldName, targetPath, targetClassName);
+                    modifiedFiles.add(sourcePath);
+                    modifiedFiles.add(targetPath);
+                }
+            }
+            case UPDATE_REFERENCE -> {
+                log.info("执行 UPDATE_REFERENCE: {}", step.getDescription());
+                String[] names = extractOldNewNames(step.getDescription());
+                if (names != null && names.length == 2) {
+                    updateMethodCallReferences(sourcePath, names[0], names[1]);
+                    modifiedFiles.add(sourcePath);
+                }
+            }
             default -> log.info("执行步骤: {}", step.getDescription());
         }
         return modifiedFiles;
+    }
+
+    private String extractNewClassName(String description) {
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("提取\\s+(\\w+)");
+        java.util.regex.Matcher matcher = pattern.matcher(description);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        pattern = java.util.regex.Pattern.compile("新类\\s*[:：]\\s*(\\w+)");
+        matcher = pattern.matcher(description);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
+    }
+
+    private String extractPackageName(Path sourceFile) {
+        CompilationUnit cu = parseFile(sourceFile);
+        if (cu != null && cu.getPackageDeclaration().isPresent()) {
+            return cu.getPackageDeclaration().get().getNameAsString();
+        }
+        return "";
+    }
+
+    private List<String> extractMethodNames(String description) {
+        List<String> names = new ArrayList<>();
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(\\w+)\\s*\\(");
+        java.util.regex.Matcher matcher = pattern.matcher(description);
+        while (matcher.find()) {
+            String name = matcher.group(1);
+            if (!name.equals("new") && !name.equals("this") && !name.equals("super")) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    private List<String> extractFieldNames(String description) {
+        List<String> names = new ArrayList<>();
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("迁移\\s+(\\w+)\\s+字段");
+        java.util.regex.Matcher matcher = pattern.matcher(description);
+        while (matcher.find()) {
+            names.add(matcher.group(1));
+        }
+        return names;
+    }
+
+    private String extractTargetClassName(String description) {
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("到\\s+(\\w+)");
+        java.util.regex.Matcher matcher = pattern.matcher(description);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
+    }
+
+    private String extractFieldName(String description) {
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("迁移\\s+(\\w+)\\s+字段");
+        java.util.regex.Matcher matcher = pattern.matcher(description);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
+    }
+
+    private String[] extractOldNewNames(String description) {
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("将\\s+(\\w+)\\s+改为\\s+(\\w+)");
+        java.util.regex.Matcher matcher = pattern.matcher(description);
+        if (matcher.find()) {
+            return new String[]{matcher.group(1), matcher.group(2)};
+        }
+        return null;
     }
 
     // ---- 工具方法 ----
@@ -290,7 +418,10 @@ public class CodeModifier {
      */
     private CompilationUnit parseFile(Path file) {
         try {
-            ParseResult<CompilationUnit> result = javaParser.parse(file);
+            ParserConfiguration config = new ParserConfiguration();
+            config.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
+            JavaParser parser = new JavaParser(config);
+            ParseResult<CompilationUnit> result = parser.parse(file);
             if (result.isSuccessful() && result.getResult().isPresent()) {
                 return result.getResult().get();
             }

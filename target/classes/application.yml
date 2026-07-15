@@ -10,14 +10,34 @@ spring:
 
 # 重构 Agent 配置
 rebuild:
-  # LLM 配置（支持通义千问/Claude/OpenAI 兼容接口）
+  # LLM 配置（支持所有 OpenAI 兼容接口）
+  # 以下是常用 LLM 的配置示例，取消注释并配置 API Key 即可使用
   llm:
-    # 通义千问 DashScope 兼容接口；Claude 可用 https://api.anthropic.com
-    base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-    # API Key，请替换为你的真实 Key；留空则使用规则引擎降级分析
-    api-key: ${REBUILD_LLM_API_KEY:}
-    # 模型名称：qwen-plus / qwen-max / gpt-4o / claude-3-sonnet
-    model-name: qwen-plus
+    # ==================== 通义千问（默认） ====================
+#    base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+#    api-key: ${REBUILD_LLM_API_KEY:}
+#    model-name: qwen-plus
+
+    # ==================== DeepSeek ====================
+    base-url: https://api.deepseek.com/v1
+    api-key: ${REBUILD_LLM_API_KEY:sk-0fc0b2720c40490eba322c9ac2079afb}
+    model-name: deepseek-v4-flash
+
+    # ==================== Claude（Anthropic） ====================
+    # base-url: https://api.anthropic.com/v1
+    # api-key: ${REBUILD_LLM_API_KEY:}
+    # model-name: claude-3-sonnet-20240229
+
+    # ==================== OpenAI ====================
+    # base-url: https://api.openai.com/v1
+    # api-key: ${REBUILD_LLM_API_KEY:}
+    # model-name: gpt-4o
+
+    # ==================== Ollama（本地部署） ====================
+    # base-url: http://localhost:11434/v1
+    # api-key: ollama
+    # model-name: llama3.3:70b
+
     temperature: 0.3
     max-tokens: 4096
 
@@ -26,12 +46,14 @@ rebuild:
     neo4j:
       data-path: ./neo4j-data
 
-  # Maven 配置
-  maven:
+  # 构建工具配置（自动检测 Maven/Gradle）
+  build:
     # Maven home 目录，留空则使用系统 PATH 中的 mvn
-    home: ${MAVEN_HOME:}
-    # Maven 仓库镜像（可选）
-    repo: ""
+    maven-home: ${MAVEN_HOME:}
+    # Gradle home 目录，留空则使用系统 PATH 中的 gradle
+    gradle-home: ${GRADLE_HOME:}
+    # JDK home 目录，用于执行 Maven/Gradle 时设置 JAVA_HOME
+    jdk-home: ${JAVA_HOME:}
     # 测试超时时间（毫秒），默认 10 分钟
     timeout-ms: 600000
 
@@ -39,6 +61,8 @@ rebuild:
   executor:
     # 最大连续失败重试次数，超过则生成人工介入报告
     max-retries: 3
+    # 验证模式：test（全量测试）/ compile（仅编译）/ skip（跳过验证）
+    test-mode: test
 
   # 报告输出目录
   report:
