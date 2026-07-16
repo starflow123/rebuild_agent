@@ -30,9 +30,9 @@ public class FailureAnalyzer {
     private static final Pattern EXCEPTION_PATTERN =
             Pattern.compile("([\\w.]+(?:Exception|Error|Throwable)):\\s*(.*)");
 
-    /** 匹配编译错误：[ERROR] /path/File.java:[line,col] message */
+    /** 匹配编译错误：F:\path\File.java:123: error: message */
     private static final Pattern COMPILE_ERROR_PATTERN =
-            Pattern.compile("\\[ERROR\\]\\s*([^:]+\\.java):\\[(\\d+),(\\d+)\\]\\s*(.+)");
+            Pattern.compile("([^\\s]+\\.java):(\\d+):(?:(\\d+):)?\\s*(error|警告|warning):\\s*(.+)");
 
     /**
      * 分析测试结果，提取失败根因
@@ -111,8 +111,12 @@ public class FailureAnalyzer {
             CompileError error = new CompileError();
             error.setFile(matcher.group(1));
             error.setLine(Integer.parseInt(matcher.group(2)));
-            error.setColumn(Integer.parseInt(matcher.group(3)));
-            error.setMessage(matcher.group(4).trim());
+            if (matcher.group(3) != null) {
+                error.setColumn(Integer.parseInt(matcher.group(3)));
+            } else {
+                error.setColumn(0);
+            }
+            error.setMessage(matcher.group(5).trim());
             errors.add(error);
         }
         return errors;

@@ -8,6 +8,7 @@ import com.github.javaparser.ast.Modifier;
 import com.github.javaparser.ast.body.*;
 import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.NameExpr;
+import com.github.javaparser.ast.expr.AnnotationExpr;
 import com.github.javaparser.ast.stmt.BlockStmt;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
 import com.rebuild.agent.model.RefactorStep;
@@ -55,60 +56,96 @@ public class CodeModifier {
         log.info("提取新类: {} -> {} (包: {})", sourceClassName, newClassName, packageName);
 
         // 1. 解析原文件
-        CompilationUnit sourceCu = parseFile(sourceFile);
-        if (sourceCu == null) {
-            throw new RuntimeException("无法解析源文件: " + sourceFile);
+        ParserConfiguration config = new ParserConfiguration();
+        config.setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17);
+        JavaParser parser = new JavaParser(config);
+        CompilationUnit sourceCu;
+        try {
+            ParseResult<CompilationUnit> result = parser.parse(sourceFile);
+            if (!result.isSuccessful() || result.getResult().isEmpty()) {
+                throw new RuntimeException("无法解析源文件: " + sourceFile + " - " + result.getProblems());
+            }
+            sourceCu = result.getResult().get();
+        } catch (IOException e) {
+            throw new RuntimeException("无法读取源文件: " + sourceFile, e);
         }
 
         // 2. 创建新类的 CompilationUnit
         CompilationUnit newCu = new CompilationUnit();
         newCu.setPackageDeclaration(packageName);
 
-        // 复制必要的 import（简化处理：复制全部 import）
+        // 复制所有 import
         sourceCu.getImports().forEach(newCu::addImport);
 
         // 创建新类声明
         ClassOrInterfaceDeclaration newClassDecl = newCu.addClass(newClassName);
-        // 添加 @Component 注解（Spring 习惯）
-        newClassDecl.addAnnotation("org.springframework.stereotype.Component");
         newClassDecl.setComment(new com.github.javaparser.ast.comments.LineComment(
                 "由重构 Agent 从 " + sourceClassName + " 自动提取生成"));
 
-        // 3. 从原类中移除并迁移方法
+        // 3. 获取原类
         Optional<ClassOrInterfaceDeclaration> sourceClassOpt = sourceCu.getClassByName(sourceClassName);
         if (sourceClassOpt.isEmpty()) {
             throw new RuntimeException("源文件中未找到类: " + sourceClassName);
         }
         ClassOrInterfaceDeclaration sourceClass = sourceClassOpt.get();
 
+        // 4. 检测原类的Spring注解类型，应用到新类
+        String springAnnotation = detectSpringAnnotation(sourceClass);
+        newClassDecl.addAnnotation(springAnnotation);
+        log.info("新类使用Spring注解: {}", springAnnotation);
+
+        // 4. 收集待迁移的方法
+        List<MethodDeclaration> methodsToCopy = new ArrayList<>();
         for (String methodName : methodsToMove) {
             Optional<MethodDeclaration> methodOpt = sourceClass.getMethodsByName(methodName).stream().findFirst();
             if (methodOpt.isPresent()) {
-                MethodDeclaration method = methodOpt.get();
-                // 复制方法到新类
-                MethodDeclaration copied = method.clone();
-                newClassDecl.addMember(copied);
-                // 从原类移除
-                sourceClass.remove(method);
-                log.debug("迁移方法: {}", methodName);
+                methodsToCopy.add(methodOpt.get());
             } else {
                 log.warn("未找到待迁移方法: {}", methodName);
             }
         }
 
-        // 4. 从原类中移除并迁移字段
-        for (String fieldName : fieldsToMove) {
+        // 5. 自动检测方法依赖的字段，补充到迁移列表
+        Set<String> dependentFields = new HashSet<>(fieldsToMove);
+        Set<String> dependentPrivateMethods = new HashSet<>();
+        Set<String> dependentConstants = new HashSet<>();
+        for (MethodDeclaration method : methodsToCopy) {
+            Set<String> usedFields = findUsedFieldsInMethod(method, sourceClass);
+            dependentFields.addAll(usedFields);
+            log.debug("方法 {} 依赖字段: {}", method.getNameAsString(), usedFields);
+
+            Set<String> usedPrivateMethods = findUsedPrivateMethods(method, sourceClass);
+            dependentPrivateMethods.addAll(usedPrivateMethods);
+            log.debug("方法 {} 依赖私有方法: {}", method.getNameAsString(), usedPrivateMethods);
+
+            Set<String> usedConstants = findUsedConstants(method, sourceClass);
+            dependentConstants.addAll(usedConstants);
+            log.debug("方法 {} 依赖常量: {}", method.getNameAsString(), usedConstants);
+        }
+        if (dependentFields.size() > fieldsToMove.size()) {
+            log.info("自动检测到额外依赖字段: {}", dependentFields);
+        }
+        if (!dependentPrivateMethods.isEmpty()) {
+            log.info("自动检测到依赖私有方法: {}", dependentPrivateMethods);
+        }
+        if (!dependentConstants.isEmpty()) {
+            log.info("自动检测到依赖常量: {}", dependentConstants);
+        }
+
+        // 6. 迁移字段
+        for (String fieldName : dependentFields) {
             for (FieldDeclaration field : new ArrayList<>(sourceClass.getFields())) {
                 List<VariableDeclarator> variablesCopy = new ArrayList<>(field.getVariables());
                 for (VariableDeclarator var : variablesCopy) {
                     if (var.getNameAsString().equals(fieldName)) {
-                    FieldDeclaration copiedField = new FieldDeclaration();
-                    field.getModifiers().forEach(m -> copiedField.addModifier(m.getKeyword()));
-                    copiedField.addVariable(var.clone());
-                    newClassDecl.addMember(copiedField);
-                    field.remove(var);
-                    log.debug("迁移字段: {}", fieldName);
-                }
+                        FieldDeclaration copiedField = new FieldDeclaration();
+                        field.getModifiers().forEach(m -> copiedField.addModifier(m.getKeyword()));
+                        field.getAnnotations().forEach(a -> copiedField.addAnnotation(a.clone()));
+                        copiedField.addVariable(var.clone());
+                        newClassDecl.addMember(copiedField);
+                        field.remove(var);
+                        log.debug("迁移字段: {}", fieldName);
+                    }
                 }
                 if (field.getVariables().isEmpty()) {
                     sourceClass.remove(field);
@@ -116,15 +153,133 @@ public class CodeModifier {
             }
         }
 
-        // 5. 写回原文件
+        // 7. 迁移私有方法依赖
+        for (String privateMethodName : dependentPrivateMethods) {
+            Optional<MethodDeclaration> methodOpt = sourceClass.getMethodsByName(privateMethodName).stream().findFirst();
+            if (methodOpt.isPresent()) {
+                MethodDeclaration method = methodOpt.get();
+                MethodDeclaration copied = method.clone();
+                newClassDecl.addMember(copied);
+                sourceClass.remove(method);
+                log.debug("迁移私有方法: {}", privateMethodName);
+            }
+        }
+
+        // 8. 迁移常量依赖（静态final字段）
+        for (String constantName : dependentConstants) {
+            for (FieldDeclaration field : new ArrayList<>(sourceClass.getFields())) {
+                List<VariableDeclarator> variablesCopy = new ArrayList<>(field.getVariables());
+                for (VariableDeclarator var : variablesCopy) {
+                    if (var.getNameAsString().equals(constantName)) {
+                        FieldDeclaration copiedField = new FieldDeclaration();
+                        field.getModifiers().forEach(m -> copiedField.addModifier(m.getKeyword()));
+                        copiedField.addVariable(var.clone());
+                        newClassDecl.addMember(copiedField);
+                        field.remove(var);
+                        log.debug("迁移常量: {}", constantName);
+                    }
+                }
+                if (field.getVariables().isEmpty()) {
+                    sourceClass.remove(field);
+                }
+            }
+        }
+
+        // 9. 迁移方法
+        for (MethodDeclaration method : methodsToCopy) {
+            MethodDeclaration copied = method.clone();
+            newClassDecl.addMember(copied);
+            sourceClass.remove(method);
+            log.debug("迁移方法: {}", method.getNameAsString());
+        }
+
+        // 10. 写回原文件
         writeCuToFile(sourceCu, sourceFile);
 
-        // 6. 写入新文件
+        // 11. 写入新文件
         Path newFile = resolveSourceFile(sourceFile, packageName, newClassName);
         writeCuToFile(newCu, newFile);
 
         log.info("新类提取完成: {}", newFile);
         return newFile;
+    }
+
+    private Set<String> findUsedFieldsInMethod(MethodDeclaration method, ClassOrInterfaceDeclaration sourceClass) {
+        Set<String> usedFields = new HashSet<>();
+        Set<String> classFieldNames = sourceClass.getFields().stream()
+                .flatMap(f -> f.getVariables().stream())
+                .map(v -> v.getNameAsString())
+                .collect(java.util.stream.Collectors.toSet());
+
+        method.findAll(NameExpr.class).forEach(nameExpr -> {
+            String name = nameExpr.getNameAsString();
+            if (classFieldNames.contains(name)) {
+                usedFields.add(name);
+            }
+        });
+
+        return usedFields;
+    }
+
+    private String detectSpringAnnotation(ClassOrInterfaceDeclaration sourceClass) {
+        Set<String> springAnnotations = Set.of(
+                "org.springframework.stereotype.Service",
+                "org.springframework.stereotype.Repository",
+                "org.springframework.stereotype.Controller",
+                "org.springframework.stereotype.Component",
+                "org.springframework.stereotype.Configuration"
+        );
+
+        for (AnnotationExpr annotation : sourceClass.getAnnotations()) {
+            String annotationName = annotation.getNameAsString();
+            if (springAnnotations.contains(annotationName)) {
+                return annotationName;
+            }
+            // 处理简化的注解名（不带包名）
+            for (String fullAnnotation : springAnnotations) {
+                if (fullAnnotation.endsWith("." + annotationName)) {
+                    return fullAnnotation;
+                }
+            }
+        }
+
+        return "org.springframework.stereotype.Component";
+    }
+
+    private Set<String> findUsedPrivateMethods(MethodDeclaration method, ClassOrInterfaceDeclaration sourceClass) {
+        Set<String> usedMethods = new HashSet<>();
+        Set<String> privateMethodNames = sourceClass.getMethods().stream()
+                .filter(m -> m.getModifiers().contains(Modifier.Keyword.PRIVATE))
+                .map(m -> m.getNameAsString())
+                .collect(java.util.stream.Collectors.toSet());
+
+        method.findAll(MethodCallExpr.class).forEach(call -> {
+            String methodName = call.getNameAsString();
+            if (privateMethodNames.contains(methodName)) {
+                usedMethods.add(methodName);
+            }
+        });
+
+        return usedMethods;
+    }
+
+    private Set<String> findUsedConstants(MethodDeclaration method, ClassOrInterfaceDeclaration sourceClass) {
+        Set<String> usedConstants = new HashSet<>();
+        Set<String> constantNames = sourceClass.getFields().stream()
+                .filter(f -> f.getModifiers().contains(Modifier.Keyword.STATIC) && 
+                           f.getModifiers().contains(Modifier.Keyword.FINAL))
+                .flatMap(f -> f.getVariables().stream())
+                .map(v -> v.getNameAsString())
+                .collect(java.util.stream.Collectors.toSet());
+
+        method.findAll(NameExpr.class).forEach(nameExpr -> {
+            String name = nameExpr.getNameAsString();
+            if (constantNames.contains(name)) {
+                usedConstants.add(name);
+            }
+        });
+
+        return usedConstants;
     }
 
     /**
@@ -267,6 +422,15 @@ public class CodeModifier {
             return;
         }
 
+        // 检查字段是否已存在
+        boolean fieldExists = classDecl.getFields().stream()
+                .flatMap(f -> f.getVariables().stream())
+                .anyMatch(v -> v.getNameAsString().equals(fieldName));
+        if (fieldExists) {
+            log.warn("字段已存在，跳过添加: {} {} (类: {})", fieldType, fieldName, className);
+            return;
+        }
+
         FieldDeclaration field = classDecl.addField(fieldType, fieldName, Modifier.Keyword.PRIVATE);
         if (annotation != null) {
             field.addAnnotation(annotation);
@@ -296,9 +460,15 @@ public class CodeModifier {
                 log.info("执行 EXTRACT_CLASS: {}", step.getDescription());
                 String description = step.getDescription();
                 String newClassName = extractNewClassName(description);
+                String sourceClassName = extractSourceClassName(description);
+                
+                if (sourceClassName == null) {
+                    sourceClassName = targetClass;
+                }
+                
                 if (newClassName != null) {
                     String packageName = extractPackageName(sourcePath);
-                    modifiedFiles.add(extractClass(sourcePath, targetClass, newClassName, packageName,
+                    modifiedFiles.add(extractClass(sourcePath, sourceClassName, newClassName, packageName,
                             extractMethodNames(description), extractFieldNames(description)));
                     modifiedFiles.add(sourcePath);
                 } else {
@@ -350,6 +520,16 @@ public class CodeModifier {
         if (matcher.find()) {
             return matcher.group(1);
         }
+        pattern = java.util.regex.Pattern.compile("提取(\\w+)新类");
+        matcher = pattern.matcher(description);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        pattern = java.util.regex.Pattern.compile("创建(\\w+)");
+        matcher = pattern.matcher(description);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
         return null;
     }
 
@@ -387,6 +567,20 @@ public class CodeModifier {
     private String extractTargetClassName(String description) {
         java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("到\\s+(\\w+)");
         java.util.regex.Matcher matcher = pattern.matcher(description);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
+    }
+
+    private String extractSourceClassName(String description) {
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("从\\s+(\\w+)\\s+提取");
+        java.util.regex.Matcher matcher = pattern.matcher(description);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        pattern = java.util.regex.Pattern.compile("(\\w+)\\s+提取");
+        matcher = pattern.matcher(description);
         if (matcher.find()) {
             return matcher.group(1);
         }

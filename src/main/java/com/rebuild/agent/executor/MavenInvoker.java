@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -39,6 +40,9 @@ public class MavenInvoker {
         String resolvedMavenHome = resolveMavenHome();
         log.info("解析到 Maven home: {}", resolvedMavenHome);
 
+        String resolvedJdkHome = resolveJdkHome();
+        log.info("解析到 JDK home: {}", resolvedJdkHome);
+
         TestResult result = new TestResult();
 
         if (resolvedMavenHome != null && !resolvedMavenHome.isEmpty()) {
@@ -49,7 +53,7 @@ public class MavenInvoker {
             log.warn("Maven Invoker API 执行失败，尝试系统命令方式...");
         }
 
-        result = runWithSystemCommand(projectDir, goal, startTime);
+        result = runWithSystemCommand(projectDir, resolvedJdkHome, goal, startTime);
         return result;
     }
 
@@ -90,17 +94,17 @@ public class MavenInvoker {
         return result;
     }
 
-    private TestResult runWithSystemCommand(String projectDir, String goal, long startTime) {
+    private TestResult runWithSystemCommand(String projectDir, String jdkHomePath, String goal, long startTime) {
         TestResult result = new TestResult();
         try {
             ProcessBuilder processBuilder = new ProcessBuilder();
             processBuilder.directory(new File(projectDir));
 
             Map<String, String> env = processBuilder.environment();
-            if (jdkHome != null && !jdkHome.isEmpty()) {
-                env.put("JAVA_HOME", jdkHome);
-                env.put("PATH", jdkHome + File.separator + "bin" + File.pathSeparator + env.getOrDefault("PATH", ""));
-                log.info("设置 JAVA_HOME: {}", jdkHome);
+            if (jdkHomePath != null && !jdkHomePath.isEmpty()) {
+                env.put("JAVA_HOME", jdkHomePath);
+                env.put("PATH", jdkHomePath + File.separator + "bin" + File.pathSeparator + env.getOrDefault("PATH", ""));
+                log.info("设置 JAVA_HOME: {}", jdkHomePath);
             }
 
             String os = System.getProperty("os.name").toLowerCase();
@@ -134,7 +138,7 @@ public class MavenInvoker {
             String output = outputBuilder.toString() + errorBuilder.toString();
             long duration = System.currentTimeMillis() - startTime;
             result.setDurationMs(duration);
-            result.setRawOutput(output.length() > 5000 ? output.substring(0, 5000) : output);
+            result.setRawOutput(output.length() > 100000 ? output.substring(0, 100000) : output);
 
             parseBuildOutput(output, result, goal);
 
@@ -165,6 +169,68 @@ public class MavenInvoker {
         });
         thread.start();
         return thread;
+    }
+
+    private String resolveJdkHome() {
+        if (jdkHome != null && !jdkHome.isEmpty()) {
+            return jdkHome;
+        }
+
+        String envJavaHome = System.getenv("JAVA_HOME");
+        if (envJavaHome != null && !envJavaHome.isEmpty()) {
+            if (isJava17(envJavaHome)) {
+                return envJavaHome;
+            }
+            log.warn("JAVA_HOME 指向 {}，但不是 JDK17，尝试自动检测", envJavaHome);
+        }
+
+        String[] commonPaths = {
+                "F:\\JAVA\\JDK\\JDK17",
+                "C:\\Program Files\\Java\\jdk-17",
+                "C:\\Program Files\\Java\\jdk17",
+                System.getProperty("user.home") + "\\jdk-17",
+                System.getProperty("user.home") + "\\jdk17"
+        };
+
+        for (String path : commonPaths) {
+            if (isJava17(path)) {
+                log.info("自动检测到 JDK17: {}", path);
+                return path;
+            }
+        }
+
+        log.warn("未找到 JDK17，使用系统默认 JAVA_HOME");
+        return envJavaHome;
+    }
+
+    private boolean isJava17(String javaHome) {
+        if (javaHome == null) {
+            return false;
+        }
+        File javaExe = new File(javaHome + File.separator + "bin" + File.separator + "java.exe");
+        if (!javaExe.exists()) {
+            javaExe = new File(javaHome + File.separator + "bin" + File.separator + "java");
+        }
+        if (!javaExe.exists()) {
+            return false;
+        }
+        try {
+            ProcessBuilder pb = new ProcessBuilder(javaExe.getAbsolutePath(), "-version");
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            StringBuilder output = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line);
+                }
+            }
+            process.waitFor(5000, java.util.concurrent.TimeUnit.MILLISECONDS);
+            return output.toString().contains("17");
+        } catch (Exception e) {
+            log.debug("检测 JDK 版本失败: {}", javaHome);
+            return false;
+        }
     }
 
     private String resolveMavenHome() {
@@ -209,14 +275,50 @@ public class MavenInvoker {
             result.setSuccess(true);
         } else if (output.contains("BUILD FAILURE")) {
             result.setSuccess(false);
-            Pattern errorPattern = Pattern.compile("\\[ERROR\\]\\s*(.+?)\\n");
-            Matcher matcher = errorPattern.matcher(output);
             StringBuilder summaryBuilder = new StringBuilder();
-            int errorCount = 0;
-            while (matcher.find() && errorCount < 5) {
-                summaryBuilder.append(matcher.group(1)).append("\n");
-                errorCount++;
+            summaryBuilder.append("构建失败！\n\n");
+
+            Pattern compileErrorPattern = Pattern.compile(
+                    "([^\\s]+\\.java):(\\d+):(\\d+):\\s*(error|警告|warning):\\s*(.+?)(?:\\n|$)");
+            Matcher compileMatcher = compileErrorPattern.matcher(output);
+            int compileErrorCount = 0;
+            while (compileMatcher.find() && compileErrorCount < 15) {
+                String file = compileMatcher.group(1);
+                String line = compileMatcher.group(2);
+                String col = compileMatcher.group(3);
+                String type = compileMatcher.group(4);
+                String message = compileMatcher.group(5).trim();
+                summaryBuilder.append(String.format("[%s] %s:%s:%s %s%n", type.toUpperCase(), file, line, col, message));
+                compileErrorCount++;
             }
+
+            if (compileErrorCount == 0) {
+                Pattern simpleErrorPattern = Pattern.compile(
+                        "([^\\s]+\\.java):(\\d+):\\s*(error|警告|warning):\\s*(.+?)(?:\\n|$)");
+                Matcher simpleMatcher = simpleErrorPattern.matcher(output);
+                while (simpleMatcher.find() && compileErrorCount < 15) {
+                    String file = simpleMatcher.group(1);
+                    String line = simpleMatcher.group(2);
+                    String type = simpleMatcher.group(3);
+                    String message = simpleMatcher.group(4).trim();
+                    summaryBuilder.append(String.format("[%s] %s:%s %s%n", type.toUpperCase(), file, line, message));
+                    compileErrorCount++;
+                }
+            }
+
+            if (compileErrorCount == 0) {
+                Pattern errorPattern = Pattern.compile("\\[ERROR\\]\\s*(.+?)\\n");
+                Matcher matcher = errorPattern.matcher(output);
+                int errorCount = 0;
+                while (matcher.find() && errorCount < 10) {
+                    summaryBuilder.append("[ERROR] ").append(matcher.group(1)).append("\n");
+                    errorCount++;
+                }
+            }
+
+            summaryBuilder.append("\n完整输出前10000字符:\n");
+            summaryBuilder.append(output.length() > 10000 ? output.substring(0, 10000) : output);
+
             result.setFailureSummary(summaryBuilder.toString().trim());
         }
     }
